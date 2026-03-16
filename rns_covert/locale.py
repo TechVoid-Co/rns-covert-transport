@@ -1,0 +1,342 @@
+"""
+Email camouflage locales.
+
+Each locale provides pools of realistic subject lines, filenames,
+and body text for a specific language and region. The generated
+content should be indistinguishable from normal correspondence
+in that locale.
+
+To add a new locale, define a class with generate_subject(),
+generate_filename(), and generate_body() methods, then register
+it in the LOCALES dict at the bottom of this file.
+"""
+
+import random
+import time
+
+
+class _Base:
+    """Shared helpers."""
+
+    @staticmethod
+    def _rand_num():
+        styles = [
+            lambda: str(random.randint(100, 9999)),
+            lambda: f"{random.randint(1, 999)}-{random.randint(1, 99)}",
+        ]
+        return random.choice(styles)()
+
+    @staticmethod
+    def _ts():
+        return time.strftime("%Y%m%d")
+
+
+class RussianLocale(_Base):
+    """
+    Russian business and personal email patterns.
+    Primary target: Yandex Mail, Mail.ru.
+    """
+
+    @staticmethod
+    def _rand_date():
+        styles = [
+            lambda: f"{random.randint(1,28):02d}.{random.randint(1,12):02d}",
+            lambda: f"{random.randint(1,28):02d}.{random.randint(1,12):02d}.{random.choice(['2025','2026'])}",
+            lambda: random.choice([
+                "январь", "февраль", "март", "апрель", "май", "июнь",
+                "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+            ]),
+        ]
+        return random.choice(styles)()
+
+    @staticmethod
+    def _rand_num_ru():
+        styles = [
+            lambda: str(random.randint(100, 9999)),
+            lambda: f"{random.randint(1,999)}-{random.randint(1,99)}",
+            lambda: f"{random.choice(['А','Б','В','К','М','Н','П','С'])}-{random.randint(100,9999)}",
+        ]
+        return random.choice(styles)()
+
+    @classmethod
+    def generate_subject(cls) -> str:
+        n = cls._rand_num_ru()
+        d = cls._rand_date()
+
+        pool = [
+            f"Отчёт за {d}",
+            f"Документы на подпись",
+            f"Счёт-фактура №{n}",
+            f"Акт выполненных работ №{n}",
+            f"Накладная №{n}",
+            f"Договор №{n}",
+            f"Смета на утверждение",
+            f"Протокол совещания {d}",
+            f"Бухгалтерские документы за {d}",
+            f"Выписка из реестра",
+            f"Справка по запросу",
+            f"Заявление на отпуск",
+            f"Табель учёта за {d}",
+            f"Коммерческое предложение №{n}",
+            f"Презентация проекта",
+            f"Re: Согласование бюджета",
+            f"Re: Вопрос по договору №{n}",
+            f"Fwd: Письмо от контрагента",
+            f"Подтверждение заказа №{n}",
+            f"Квитанция об оплате",
+            f"Чек №{n} от {d}",
+            f"Возврат товара - заявка №{n}",
+            f"Доставка заказа №{n}",
+            f"Фотографии",
+            f"Фото с поездки",
+            f"Сканы документов",
+            f"Как договаривались",
+            f"Пересылаю файлы",
+            f"По вашей просьбе",
+            f"Материалы к встрече {d}",
+            f"Рецепт",
+            f"Адреса и контакты",
+            f"Файлы для печати",
+            f"Re: Спасибо!",
+            f"Re: Встреча",
+            f"Re: Вопрос",
+            f"Напоминание",
+            f"Обновлённая версия",
+            f"Исправленный документ",
+            f"Резервная копия {d}",
+        ]
+        return random.choice(pool)
+
+    @classmethod
+    def generate_filename(cls) -> str:
+        n = cls._rand_num_ru()
+        ts = cls._ts()
+        d = cls._rand_date()
+
+        pool = [
+            f"scan_{random.randint(1,999):03d}.pdf",
+            f"IMG_{ts}_{random.randint(1000,9999)}.jpg",
+            f"photo_{random.randint(1,50)}.jpg",
+            f"скан_{random.randint(1,99)}.pdf",
+            f"отчёт.xlsx",
+            f"отчёт_{d}.xlsx",
+            f"договор_{n}.docx",
+            f"акт_{n}.pdf",
+            f"накладная_{n}.pdf",
+            f"счёт_{n}.pdf",
+            f"смета.xlsx",
+            f"протокол.docx",
+            f"справка.pdf",
+            f"выписка.pdf",
+            f"заявление.docx",
+            f"презентация.pdf",
+            f"архив.zip",
+            f"документы.zip",
+            f"backup_{ts}.zip",
+            f"файлы.rar",
+            f"данные.zip",
+            f"1С_выгрузка.zip",
+            f"data.bin",
+            f"export_{ts}.dat",
+            f"файл.dat",
+        ]
+        return random.choice(pool)
+
+    @staticmethod
+    def generate_body(has_attachment: bool) -> str:
+        if not has_attachment:
+            return None
+
+        pool = [
+            "Добрый день!\nФайлы во вложении.\nС уважением.",
+            "Здравствуйте,\nПересылаю документы как договаривались.",
+            "Привет!\nВот файлы, посмотри.",
+            "Высылаю запрошенные документы.\nЕсли будут вопросы - пишите.",
+            "Добрый день,\nВо вложении обновлённая версия.\nС уважением.",
+            "Пересылаю.\nДай знать если всё ок.",
+            "Здравствуйте!\nПрикрепляю файлы по нашему разговору.",
+            "Высылаю данные. Жду обратной связи.",
+            "Файлы готовы, отправляю.",
+            "Как и обещал - файлы в приложении.",
+            "Добрый день!\nНаправляю материалы.\nС уважением.",
+            "Высылаю сканы, оригиналы отправлю почтой.",
+        ]
+        return random.choice(pool)
+
+
+class EnglishLocale(_Base):
+    """
+    English business and personal email patterns.
+    For use with Gmail, Outlook, Yahoo, or any English-language provider.
+    """
+
+    @classmethod
+    def generate_subject(cls) -> str:
+        n = cls._rand_num()
+        months = [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+        d = random.choice(months)
+
+        pool = [
+            f"Report for {d}",
+            f"Documents for review",
+            f"Invoice #{n}",
+            f"Receipt #{n}",
+            f"Contract #{n}",
+            f"Meeting notes - {d}",
+            f"Quarterly summary",
+            f"Budget update",
+            f"Re: Project files",
+            f"Re: Follow up",
+            f"Fwd: From accounting",
+            f"Order confirmation #{n}",
+            f"Delivery notice #{n}",
+            f"Expense report - {d}",
+            f"Photos",
+            f"Scanned documents",
+            f"As discussed",
+            f"Files attached",
+            f"Per your request",
+            f"Materials for the meeting",
+            f"Updated version",
+            f"Revised document",
+            f"Backup - {d}",
+            f"Re: Thanks",
+            f"Re: Question",
+            f"Reminder",
+            f"FYI",
+            f"Quick update",
+            f"Re: Schedule",
+            f"Tax documents #{n}",
+        ]
+        return random.choice(pool)
+
+    @classmethod
+    def generate_filename(cls) -> str:
+        n = cls._rand_num()
+        ts = cls._ts()
+
+        pool = [
+            f"scan_{random.randint(1,999):03d}.pdf",
+            f"IMG_{ts}_{random.randint(1000,9999)}.jpg",
+            f"photo_{random.randint(1,50)}.jpg",
+            f"report.xlsx",
+            f"report_{ts}.xlsx",
+            f"contract_{n}.docx",
+            f"invoice_{n}.pdf",
+            f"receipt_{n}.pdf",
+            f"estimate.xlsx",
+            f"minutes.docx",
+            f"certificate.pdf",
+            f"statement.pdf",
+            f"application.docx",
+            f"presentation.pdf",
+            f"archive.zip",
+            f"documents.zip",
+            f"backup_{ts}.zip",
+            f"files.zip",
+            f"data.bin",
+            f"export_{ts}.dat",
+        ]
+        return random.choice(pool)
+
+    @staticmethod
+    def generate_body(has_attachment: bool) -> str:
+        if not has_attachment:
+            return None
+
+        pool = [
+            "Hi,\nPlease find the files attached.\nBest regards.",
+            "Hello,\nForwarding the documents as discussed.",
+            "Hey,\nHere are the files, take a look.",
+            "Sending the requested documents.\nLet me know if you have questions.",
+            "Hi,\nAttached is the updated version.\nBest regards.",
+            "Forwarding. Let me know if it looks good.",
+            "Hello,\nAttaching the files from our conversation.",
+            "Sending the data. Looking forward to your feedback.",
+            "Files are ready, sending now.",
+            "As promised, files attached.",
+            "Hi,\nSending the materials over.\nBest regards.",
+            "Scans attached. Originals in the mail.",
+        ]
+        return random.choice(pool)
+
+
+class NeutralLocale(_Base):
+    """
+    Language-neutral patterns. ASCII-only subjects and filenames.
+    Minimal text. For use when no specific locale is appropriate.
+    """
+
+    @classmethod
+    def generate_subject(cls) -> str:
+        n = cls._rand_num()
+        ts = cls._ts()
+
+        pool = [
+            f"Re: #{n}",
+            f"Fwd: #{n}",
+            f"Files",
+            f"Documents",
+            f"Update",
+            f"Re: Update",
+            f"Data",
+            f"Backup {ts}",
+            f"Report",
+            f"Info",
+        ]
+        return random.choice(pool)
+
+    @classmethod
+    def generate_filename(cls) -> str:
+        n = cls._rand_num()
+        ts = cls._ts()
+
+        pool = [
+            f"scan_{random.randint(1,999):03d}.pdf",
+            f"IMG_{ts}_{random.randint(1000,9999)}.jpg",
+            f"doc_{n}.pdf",
+            f"data_{ts}.zip",
+            f"backup_{ts}.zip",
+            f"file_{n}.dat",
+            f"export_{ts}.bin",
+            f"report.pdf",
+            f"archive.zip",
+        ]
+        return random.choice(pool)
+
+    @staticmethod
+    def generate_body(has_attachment: bool) -> str:
+        if not has_attachment:
+            return None
+
+        pool = [
+            "See attached.",
+            "Files attached.",
+            "Forwarding.",
+            "As discussed.",
+            "Please review.",
+        ]
+        return random.choice(pool)
+
+
+# ── Registry ──
+
+LOCALES = {
+    "ru": RussianLocale,
+    "en": EnglishLocale,
+    "neutral": NeutralLocale,
+}
+
+DEFAULT_LOCALE = "ru"
+
+
+def get_locale(name: str):
+    locale = LOCALES.get(name)
+    if locale is None:
+        raise ValueError(
+            f"Unknown locale '{name}'. Available: {', '.join(LOCALES.keys())}"
+        )
+    return locale
