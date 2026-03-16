@@ -165,6 +165,7 @@ class CovertInterface(Interface):
     """
 
     BITRATE_GUESS    = 1000
+    DEFAULT_IFAC_SIZE = 8
     DEFAULT_POLL_INTERVAL = 30
     DEFAULT_RETRY_DELAY   = 60
     MAX_CONSECUTIVE_ERRORS = 5
