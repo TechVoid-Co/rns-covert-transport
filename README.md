@@ -202,7 +202,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+Apache-2.0 License. See [LICENSE](LICENSE).
 
 ## Related Projects
 
