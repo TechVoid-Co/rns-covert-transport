@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rns-covert-transport"
-version = "0.1.0"
+version = "0.1.1"
 description = "Reticulum Network Stack interfaces for censorship-resistant communication over everyday services"
 readme = "README.md"
 license = {text = "Apache-2.0"}
