@@ -1,7 +1,8 @@
 """Tests for email camouflage locales."""
 
 import pytest
-from rns_covert.locale import get_locale, RussianLocale, EnglishLocale, NeutralLocale
+
+from rns_covert.locale import EnglishLocale, NeutralLocale, RussianLocale, get_locale
 
 
 class TestRussianLocale:

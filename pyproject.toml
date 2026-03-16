@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Reticulum Network Stack interfaces for censorship-resistant communication over everyday services"
 readme = "README.md"
 license = {text = "Apache-2.0"}
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 keywords = [
     "reticulum",
     "censorship",
@@ -27,7 +27,6 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -60,7 +59,10 @@ include = ["rns_covert*"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py38"
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

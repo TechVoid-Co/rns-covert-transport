@@ -3,7 +3,9 @@ Tests for HDLC framing and the CovertInterface base class.
 """
 
 import os
+
 import pytest
+
 from rns_covert.base import HDLC, Padding
 
 
