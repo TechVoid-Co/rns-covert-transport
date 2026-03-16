@@ -12,12 +12,13 @@ Subclasses only need to implement:
   - stop_transport()
 """
 
+import base64
+import collections
 import os
 import struct
-import time
 import threading
-import collections
-import base64
+import time
+
 import RNS
 from RNS.Interfaces.Interface import Interface
 
@@ -164,13 +165,13 @@ class CovertInterface(Interface):
     """
 
     BITRATE_GUESS    = 1000
-    DEFAULT_IFAC_SIZE = 8
     DEFAULT_POLL_INTERVAL = 30
     DEFAULT_RETRY_DELAY   = 60
     MAX_CONSECUTIVE_ERRORS = 5
     DEFAULT_INNER_SIZE = 1280
     DEFAULT_MAX_SENDS_PER_HOUR = 30
     DEFAULT_BATCH_WINDOW = 5
+    DEFAULT_MAX_QUEUE_SIZE = 1000
 
     def __init__(self, owner, configuration):
         super().__init__()
@@ -201,7 +202,7 @@ class CovertInterface(Interface):
 
         # Batching
         self.batch_window = float(c.get("batch_window", self.DEFAULT_BATCH_WINDOW))
-        self._outgoing_queue = collections.deque()
+        self._outgoing_queue = collections.deque(maxlen=self.DEFAULT_MAX_QUEUE_SIZE)
         self._queue_lock = threading.Lock()
 
         RNS.log(
@@ -325,6 +326,8 @@ class CovertInterface(Interface):
             return
 
         with self._queue_lock:
+            if len(self._outgoing_queue) >= self._outgoing_queue.maxlen:
+                RNS.log(f"{self}: outgoing queue full, dropping oldest packet", RNS.LOG_WARNING)
             self._outgoing_queue.append(data)
             self.txb += len(data)
 
@@ -365,6 +368,7 @@ class CovertInterface(Interface):
                 continue
 
             # Encode into batched payloads
+            sent_count = 0
             try:
                 payloads = self.encode_batch(packets)
 
@@ -374,6 +378,7 @@ class CovertInterface(Interface):
 
                     with self._lock:
                         self.send_packet(payload)
+                    sent_count += 1
                     self._last_send_time = time.time()
 
                     RNS.log(
@@ -386,10 +391,11 @@ class CovertInterface(Interface):
                 RNS.log(f"Flush error on {self}: {e}", RNS.LOG_WARNING)
                 self._handle_error()
 
-                # Re-queue failed packets so they're not lost
-                with self._queue_lock:
-                    for pkt in reversed(packets):
-                        self._outgoing_queue.appendleft(pkt)
+                # Only re-queue if nothing was sent (avoid duplicates on partial send)
+                if sent_count == 0:
+                    with self._queue_lock:
+                        for pkt in reversed(packets):
+                            self._outgoing_queue.appendleft(pkt)
 
     def _wait_for_rate_limit(self):
         """Sleep if necessary to stay under max_sends_per_hour."""
@@ -407,7 +413,6 @@ class CovertInterface(Interface):
     # ------------------------------------------------------------------
 
     def _start_poll_loop(self):
-        self._stop_event.clear()
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
 
@@ -416,7 +421,8 @@ class CovertInterface(Interface):
             if self.online:
                 try:
                     payloads = self.poll_packets()
-                    self._error_count = 0
+                    with self._lock:
+                        self._error_count = 0
 
                     for payload in payloads:
                         packets = self.decode_payload(payload)
@@ -434,10 +440,12 @@ class CovertInterface(Interface):
     # ------------------------------------------------------------------
 
     def _handle_error(self):
-        self._error_count += 1
-        if self._error_count >= self.MAX_CONSECUTIVE_ERRORS:
+        with self._lock:
+            self._error_count += 1
+            count = self._error_count
+        if count >= self.MAX_CONSECUTIVE_ERRORS:
             RNS.log(
-                f"{self} has had {self._error_count} consecutive errors, going offline.",
+                f"{self} has had {count} consecutive errors, going offline.",
                 RNS.LOG_ERROR,
             )
             self.online = False
@@ -445,16 +453,26 @@ class CovertInterface(Interface):
 
     def _schedule_reconnect(self):
         def _reconnect():
-            while not self.online and not self._stop_event.is_set():
+            self._stop_event.set()
+            time.sleep(1)
+            self._stop_event.clear()  # ready for new poll/flush threads
+
+            while not self.online:
+                if getattr(self, 'detached', False):
+                    return
                 try:
                     time.sleep(self.retry_delay)
+                    if getattr(self, 'detached', False):
+                        return
                     RNS.log(f"Attempting to reconnect {self}...", RNS.LOG_VERBOSE)
                     self.start_transport()
                     self.online = True
-                    self._error_count = 0
+                    with self._lock:
+                        self._error_count = 0
                     self._start_poll_loop()
                     self._start_flush_loop()
                     RNS.log(f"Reconnected {self}", RNS.LOG_NOTICE)
+                    return
                 except Exception as e:
                     RNS.log(f"Reconnect failed for {self}: {e}", RNS.LOG_WARNING)
 
@@ -466,6 +484,7 @@ class CovertInterface(Interface):
     # ------------------------------------------------------------------
 
     def detach(self):
+        self.detached = True
         self._stop_event.set()
         self.online = False
 
@@ -479,8 +498,8 @@ class CovertInterface(Interface):
                 payloads = self.encode_batch(packets)
                 for payload in payloads:
                     self.send_packet(payload)
-            except Exception:
-                pass
+            except Exception as e:
+                RNS.log(f"{self}: error during final flush on detach: {e}", RNS.LOG_DEBUG)
 
         try:
             self.stop_transport()
