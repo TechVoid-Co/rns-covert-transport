@@ -391,17 +391,22 @@ class CovertInterface(Interface):
                 )
 
             except Exception as e:
-                RNS.log(f"Flush error on {self}: {e}", RNS.LOG_WARNING)
-                self._handle_error()
-
-                # Don't re-queue on permanent server rejections (5xx)
+                # Check if server permanently rejected (5xx SMTP code)
                 smtp_code = getattr(e, 'smtp_code', 0)
                 if smtp_code >= 500:
-                    RNS.log(f"{self}: permanent rejection ({smtp_code}), dropping batch", RNS.LOG_WARNING)
-                elif sent_count == 0:
-                    with self._queue_lock:
-                        for pkt in reversed(packets):
-                            self._outgoing_queue.appendleft(pkt)
+                    RNS.log(
+                        f"{self}: server rejected send ({smtp_code}), "
+                        f"dropping {len(packets)} pkt(s): {e}",
+                        RNS.LOG_ERROR,
+                    )
+                else:
+                    RNS.log(f"Flush error on {self}: {e}", RNS.LOG_WARNING)
+                    self._handle_error()
+
+                    if sent_count == 0:
+                        with self._queue_lock:
+                            for pkt in reversed(packets):
+                                self._outgoing_queue.appendleft(pkt)
 
     def _wait_for_rate_limit(self):
         """Sleep if necessary to stay under max_sends_per_hour."""

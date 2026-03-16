@@ -180,8 +180,11 @@ class MailInterface(CovertInterface):
             self._ensure_smtp()
             try:
                 self._smtp.sendmail(self.account, [self.peer_address], msg.as_bytes())
+            except smtplib.SMTPResponseException:
+                # Server rejected the message (quota, policy, etc.) — don't retry
+                raise
             except Exception:
-                # Connection went stale — reconnect and retry once
+                # Connection error — reconnect and retry once
                 self._smtp = None
                 self._ensure_smtp()
                 self._smtp.sendmail(self.account, [self.peer_address], msg.as_bytes())
