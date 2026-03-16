@@ -241,31 +241,31 @@ class TestEncodeDecode:
 
 class TestPartialRequeue:
     def test_no_requeue_after_partial_send(self):
-        """If some payloads were sent, don't re-queue (avoids duplicates)."""
+        """If some payloads were sent, don't re-queue all (avoids duplicates)."""
         owner = _make_owner()
-        cfg = _make_config(batch_window="9999", poll_interval="9999")
+        cfg = _make_config(batch_window="9999", poll_interval="9999", max_sends_per_hour="0")
 
-        call_count = [0]
+        send_calls = []
 
         class PartialFailInterface(StubInterface):
             def send_packet(self, encoded_data):
-                call_count[0] += 1
-                if call_count[0] > 1:
+                send_calls.append(encoded_data)
+                if len(send_calls) == 2:
                     raise ConnectionError("fail on second send")
-                self._sent_payloads.append(encoded_data)
 
         iface = PartialFailInterface(owner, cfg)
         try:
-            # Queue enough packets for >1 payload
+            # Manually fill queue and trigger flush to control timing
             for _ in range(100):
-                iface.process_outgoing(os.urandom(200))
+                with iface._queue_lock:
+                    iface._outgoing_queue.append(os.urandom(200))
+            iface._flush_event.set()
 
-            # Event-driven flush triggers immediately on first packet,
-            # give it time to process
             time.sleep(1.0)
 
-            # After partial failure, queue should not have all packets back
-            # (some were sent successfully)
+            # First payload sent successfully, second failed.
+            # With sent_count=1 (partial), nothing should be re-queued.
+            assert len(send_calls) == 2
             assert len(iface._outgoing_queue) == 0
         finally:
             iface.detach()
