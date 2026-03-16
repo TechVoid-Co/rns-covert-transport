@@ -381,6 +381,9 @@ class CovertInterface(Interface):
                     sent_count += 1
                     self._last_send_time = time.time()
 
+                with self._lock:
+                    self._error_count = 0
+
                 RNS.log(
                     f"{self}: sent batch ({len(packets)} pkt(s) in "
                     f"{len(payloads)} payload(s))",
@@ -391,8 +394,11 @@ class CovertInterface(Interface):
                 RNS.log(f"Flush error on {self}: {e}", RNS.LOG_WARNING)
                 self._handle_error()
 
-                # Only re-queue if nothing was sent (avoid duplicates on partial send)
-                if sent_count == 0:
+                # Don't re-queue on permanent server rejections (5xx)
+                smtp_code = getattr(e, 'smtp_code', 0)
+                if smtp_code >= 500:
+                    RNS.log(f"{self}: permanent rejection ({smtp_code}), dropping batch", RNS.LOG_WARNING)
+                elif sent_count == 0:
                     with self._queue_lock:
                         for pkt in reversed(packets):
                             self._outgoing_queue.appendleft(pkt)
@@ -421,8 +427,6 @@ class CovertInterface(Interface):
             if self.online:
                 try:
                     payloads = self.poll_packets()
-                    with self._lock:
-                        self._error_count = 0
 
                     for payload in payloads:
                         packets = self.decode_payload(payload)
