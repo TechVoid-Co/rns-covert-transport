@@ -11,6 +11,7 @@ generate_filename(), and generate_body() methods, then register
 it in the LOCALES dict at the bottom of this file.
 """
 
+import datetime
 import random
 import time
 
@@ -41,7 +42,10 @@ class RussianLocale(_Base):
     def _rand_date():
         styles = [
             lambda: f"{random.randint(1,28):02d}.{random.randint(1,12):02d}",
-            lambda: f"{random.randint(1,28):02d}.{random.randint(1,12):02d}.{random.choice(['2025','2026'])}",
+            lambda: (
+                f"{random.randint(1,28):02d}.{random.randint(1,12):02d}"
+                f".{random.choice([str(datetime.datetime.now().year - 1), str(datetime.datetime.now().year)])}"
+            ),
             lambda: random.choice([
                 "январь", "февраль", "март", "апрель", "май", "июнь",
                 "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
