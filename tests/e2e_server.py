@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """E2E test: server node. Run via test_e2e.py, not directly."""
-import sys
-import os
-import time
-import threading
 import glob
 import json
+import os
+import sys
+import threading
+import time
 
 sys.path.insert(0, os.environ["PROJECT_DIR"])
 WORKSPACE = os.environ["WORKSPACE"]
 
 import RNS  # noqa: E402
+
 from rns_covert.base import CovertInterface  # noqa: E402
+
 
 class FileMailInterface(CovertInterface):
     """Sends packets as files; polls a directory for incoming."""
@@ -58,7 +60,10 @@ with open(os.path.join(config_dir, "config"), "w") as f:
 RNS.loglevel = int(os.environ.get("RNS_LOGLEVEL", "2"))
 reticulum = RNS.Reticulum(config_dir)
 
-config_if = {"name": "FileLink-server", "poll_interval": "0.5", "bitrate": "10000", "batch_window": "1", "max_sends_per_hour": "3600"}
+config_if = {
+    "name": "FileLink-server", "poll_interval": "0.5", "bitrate": "10000",
+    "batch_window": "1", "max_sends_per_hour": "3600",
+}
 iface = FileMailInterface(RNS.Transport, config_if)
 reticulum._add_interface(iface, ifac_netname=None, ifac_netkey=None)
 

@@ -1,15 +1,17 @@
 """Tests for MailInterface email construction and extraction."""
 
 import email
+import email.encoders
+import email.mime.base
 import email.mime.multipart
 import email.mime.text
-import email.mime.base
-import email.encoders
 import os
+
 import pytest
+
 from rns_covert.base import HDLC, Padding
-from rns_covert.encoding.strategies import BlobEncoder, Base64Encoder
-from rns_covert.locale import RussianLocale, EnglishLocale
+from rns_covert.encoding.strategies import Base64Encoder, BlobEncoder
+from rns_covert.locale import EnglishLocale, RussianLocale
 
 INNER_SIZE = 1280
 

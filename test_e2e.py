@@ -13,13 +13,13 @@ Usage:
 No accounts needed. Runs in ~15 seconds.
 """
 
-import sys
-import os
-import time
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 TESTS_DIR   = os.path.join(PROJECT_DIR, "tests")
@@ -106,7 +106,7 @@ def main():
         print()
         print("=" * 60)
 
-        if server_ok:
+        if server_ok and client_ok:
             print("  ✅  TEST PASSED")
             print()
             print("  Two separate Reticulum processes communicated")
@@ -116,12 +116,13 @@ def main():
             print("    Client RNS → HDLC frame → base85 encode →")
             print("    write file → [disk] → read file →")
             print("    base85 decode → HDLC deframe → Server RNS")
-            if client_ok:
-                print()
-                print("  Proof path back confirmed (RTT measured).")
             print()
-            print("  The Yandex Mail adapter uses the exact same")
+            print("  Proof path back confirmed (RTT measured).")
+            print()
+            print("  The Mail adapter uses the exact same")
             print("  pipeline -- just IMAP/SMTP instead of files.")
+        elif server_ok:
+            print("  ⚠️  PARTIAL PASS (server received packet, no proof returned)")
         else:
             print("  ❌  TEST FAILED")
             if env.get("RNS_LOGLEVEL") == "2":
@@ -137,7 +138,7 @@ def main():
                 print(f"    {line}")
 
         print("=" * 60)
-        return server_ok
+        return server_ok and client_ok
 
     finally:
         for proc in [server_proc, client_proc]:

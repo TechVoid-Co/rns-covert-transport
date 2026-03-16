@@ -1,8 +1,10 @@
 """Tests for encoding strategies."""
 
 import os
+
 import pytest
-from rns_covert.encoding.strategies import BlobEncoder, Base64Encoder, get_encoder
+
+from rns_covert.encoding.strategies import Base64Encoder, BlobEncoder, get_encoder
 
 
 class TestBlobEncoder:
