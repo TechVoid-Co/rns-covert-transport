@@ -5,6 +5,10 @@ Handles the Reticulum interface contract, HDLC framing,
 fixed-size padding (anti-DPI), packet batching, send rate
 limiting, poll loops, and error recovery.
 
+Send and receive are fully independent: the flush loop (SMTP)
+and poll loop (IMAP) run on separate threads with separate
+error counters and connection lifecycles.
+
 Subclasses only need to implement:
   - start_transport()
   - send_packet(encoded_data: bytes)
@@ -143,7 +147,7 @@ class CovertInterface(Interface):
 
         Reticulum -> process_outgoing -> queue
                                            |
-                              [batch_window timer fires]
+                              [flush_event or batch_window timer]
                                            |
                               batch HDLC frames -> pad -> send_packet
                                                               |
@@ -156,6 +160,7 @@ class CovertInterface(Interface):
       - Rate limiting: configurable max sends per hour
       - Fixed-size padding: every email identical size
       - Idle silence: nothing queued = nothing sent
+      - Event-driven flush: first packet triggers immediate send
 
     Config:
         inner_size = 1280          # Padded payload size (both peers must match)
@@ -222,15 +227,18 @@ class CovertInterface(Interface):
         self._poll_thread   = None
         self._flush_thread  = None
         self._stop_event    = threading.Event()
-        self._error_count   = 0
+        self._shutdown_event = threading.Event()
+        self._flush_event   = threading.Event()
+        self._poll_error_count  = 0
+        self._flush_error_count = 0
         self._lock          = threading.Lock()
+        self._reconnecting  = False
 
         # Start up
         try:
             RNS.log(f"Starting covert transport for {self}...", RNS.LOG_VERBOSE)
             self.start_transport()
             self.online = True
-            self._error_count = 0
             self._start_poll_loop()
             self._start_flush_loop()
             RNS.log(f"Covert transport {self} is now online", RNS.LOG_VERBOSE)
@@ -322,15 +330,20 @@ class CovertInterface(Interface):
         """
         Called by Reticulum when it wants to send a packet.
         Queues the packet for batched, rate-limited sending.
+        Wakes the flush loop immediately on first packet.
         """
         if not self.online:
             return
 
         with self._queue_lock:
+            was_empty = len(self._outgoing_queue) == 0
             if len(self._outgoing_queue) >= self._outgoing_queue.maxlen:
                 RNS.log(f"{self}: outgoing queue full, dropping oldest packet", RNS.LOG_WARNING)
             self._outgoing_queue.append(data)
             self.txb += len(data)
+
+        if was_empty:
+            self._flush_event.set()
 
     def process_incoming(self, data: bytes):
         """Pass a received raw packet up to Reticulum."""
@@ -347,14 +360,12 @@ class CovertInterface(Interface):
 
     def _flush_loop(self):
         """
-        Periodically flush the outgoing queue.
-
-        Waits batch_window seconds to collect packets, then sends
-        them batched into as few emails as possible, respecting
-        the rate limit.
+        Flush the outgoing queue. Wakes immediately when a packet
+        arrives in an empty queue, or after batch_window timeout.
         """
         while not self._stop_event.is_set():
-            self._stop_event.wait(self.batch_window)
+            self._flush_event.wait(timeout=self.batch_window)
+            self._flush_event.clear()
 
             if not self.online or self._stop_event.is_set():
                 continue
@@ -374,7 +385,6 @@ class CovertInterface(Interface):
                 payloads = self.encode_batch(packets)
 
                 for payload in payloads:
-                    # Rate limit: wait if too soon since last send
                     self._wait_for_rate_limit()
 
                     with self._lock:
@@ -383,7 +393,7 @@ class CovertInterface(Interface):
                     self._last_send_time = time.time()
 
                 with self._lock:
-                    self._error_count = 0
+                    self._flush_error_count = 0
 
                 RNS.log(
                     f"{self}: sent batch ({len(packets)} pkt(s) in "
@@ -407,13 +417,13 @@ class CovertInterface(Interface):
                         f"keeping {len(packets)} pkt(s) in queue to retry: {e}",
                         RNS.LOG_WARNING,
                     )
-                    self._handle_error()
+                    self._handle_flush_error()
                     with self._queue_lock:
                         for pkt in reversed(packets):
                             self._outgoing_queue.appendleft(pkt)
                 else:
                     RNS.log(f"Flush error on {self}: {e}", RNS.LOG_WARNING)
-                    self._handle_error()
+                    self._handle_flush_error()
                     if sent_count == 0:
                         with self._queue_lock:
                             for pkt in reversed(packets):
@@ -451,50 +461,72 @@ class CovertInterface(Interface):
 
                 except Exception as e:
                     RNS.log(f"Poll error on {self}: {e}", RNS.LOG_WARNING)
-                    self._handle_error()
+                    self._handle_poll_error()
 
             self._stop_event.wait(self.poll_interval)
 
     # ------------------------------------------------------------------
-    #  Error recovery
+    #  Error recovery (independent for poll and flush)
     # ------------------------------------------------------------------
 
-    def _handle_error(self):
+    def _handle_flush_error(self):
         with self._lock:
-            self._error_count += 1
-            count = self._error_count
+            self._flush_error_count += 1
+            count = self._flush_error_count
         if count >= self.MAX_CONSECUTIVE_ERRORS:
             RNS.log(
-                f"{self} has had {count} consecutive errors, going offline.",
+                f"{self}: {count} consecutive flush errors, going offline.",
+                RNS.LOG_ERROR,
+            )
+            self.online = False
+            self._schedule_reconnect()
+
+    def _handle_poll_error(self):
+        with self._lock:
+            self._poll_error_count += 1
+            count = self._poll_error_count
+        if count >= self.MAX_CONSECUTIVE_ERRORS:
+            RNS.log(
+                f"{self}: {count} consecutive poll errors, going offline.",
                 RNS.LOG_ERROR,
             )
             self.online = False
             self._schedule_reconnect()
 
     def _schedule_reconnect(self):
-        def _reconnect():
-            self._stop_event.set()
-            time.sleep(1)
-            self._stop_event.clear()  # ready for new poll/flush threads
+        with self._lock:
+            if self._reconnecting:
+                return
+            self._reconnecting = True
 
-            while not self.online:
-                if getattr(self, 'detached', False):
-                    return
-                try:
-                    time.sleep(self.retry_delay)
-                    if getattr(self, 'detached', False):
+        def _reconnect():
+            try:
+                self._stop_event.set()
+                time.sleep(1)
+                self._stop_event.clear()
+
+                while not self.online:
+                    if self._shutdown_event.is_set():
                         return
-                    RNS.log(f"Attempting to reconnect {self}...", RNS.LOG_VERBOSE)
-                    self.start_transport()
-                    self.online = True
-                    with self._lock:
-                        self._error_count = 0
-                    self._start_poll_loop()
-                    self._start_flush_loop()
-                    RNS.log(f"Reconnected {self}", RNS.LOG_NOTICE)
-                    return
-                except Exception as e:
-                    RNS.log(f"Reconnect failed for {self}: {e}", RNS.LOG_WARNING)
+                    self._shutdown_event.wait(self.retry_delay)
+                    if self._shutdown_event.is_set():
+                        return
+                    try:
+                        RNS.log(f"Attempting to reconnect {self}...", RNS.LOG_VERBOSE)
+                        self.start_transport()
+                        self.online = True
+                        with self._lock:
+                            self._flush_error_count = 0
+                            self._poll_error_count = 0
+                        self._start_poll_loop()
+                        self._start_flush_loop()
+                        RNS.log(f"Reconnected {self}", RNS.LOG_NOTICE)
+                        return
+                    except Exception as e:
+                        RNS.log(f"Reconnect failed for {self}: {e}", RNS.LOG_WARNING)
+            finally:
+                with self._lock:
+                    self._reconnecting = False
 
         t = threading.Thread(target=_reconnect, daemon=True)
         t.start()
@@ -504,8 +536,9 @@ class CovertInterface(Interface):
     # ------------------------------------------------------------------
 
     def detach(self):
-        self.detached = True
+        self._shutdown_event.set()
         self._stop_event.set()
+        self._flush_event.set()
         self.online = False
 
         # Final flush -- try to send anything still queued

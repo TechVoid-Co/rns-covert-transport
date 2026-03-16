@@ -118,27 +118,65 @@ class TestBatchQueueing:
 
 
 class TestErrorRecovery:
-    def test_error_count_increments(self):
-        """_handle_error should increment error counter."""
+    def test_flush_error_count_increments(self):
+        """_handle_flush_error should increment flush error counter."""
         owner = _make_owner()
         cfg = _make_config()
         iface = StubInterface(owner, cfg)
         try:
-            iface._handle_error()
-            assert iface._error_count == 1
+            iface._handle_flush_error()
+            assert iface._flush_error_count == 1
             assert iface.online is True
         finally:
             iface.detach()
 
-    def test_goes_offline_after_max_errors(self):
-        """After MAX_CONSECUTIVE_ERRORS, should go offline."""
+    def test_poll_error_count_increments(self):
+        """_handle_poll_error should increment poll error counter."""
+        owner = _make_owner()
+        cfg = _make_config()
+        iface = StubInterface(owner, cfg)
+        try:
+            iface._handle_poll_error()
+            assert iface._poll_error_count == 1
+            assert iface.online is True
+        finally:
+            iface.detach()
+
+    def test_goes_offline_after_max_flush_errors(self):
+        """After MAX_CONSECUTIVE_ERRORS flush errors, should go offline."""
         owner = _make_owner()
         cfg = _make_config()
         iface = StubInterface(owner, cfg)
         try:
             for _ in range(CovertInterface.MAX_CONSECUTIVE_ERRORS):
-                iface._handle_error()
+                iface._handle_flush_error()
             assert iface.online is False
+        finally:
+            iface.detach()
+
+    def test_goes_offline_after_max_poll_errors(self):
+        """After MAX_CONSECUTIVE_ERRORS poll errors, should go offline."""
+        owner = _make_owner()
+        cfg = _make_config()
+        iface = StubInterface(owner, cfg)
+        try:
+            for _ in range(CovertInterface.MAX_CONSECUTIVE_ERRORS):
+                iface._handle_poll_error()
+            assert iface.online is False
+        finally:
+            iface.detach()
+
+    def test_poll_errors_dont_affect_flush(self):
+        """Poll errors should not prevent flush from working."""
+        owner = _make_owner()
+        cfg = _make_config()
+        iface = StubInterface(owner, cfg)
+        try:
+            # 4 poll errors (below threshold)
+            for _ in range(4):
+                iface._handle_poll_error()
+            assert iface.online is True
+            assert iface._flush_error_count == 0
         finally:
             iface.detach()
 
@@ -205,7 +243,7 @@ class TestPartialRequeue:
     def test_no_requeue_after_partial_send(self):
         """If some payloads were sent, don't re-queue (avoids duplicates)."""
         owner = _make_owner()
-        cfg = _make_config(batch_window="0.1", poll_interval="9999")
+        cfg = _make_config(batch_window="9999", poll_interval="9999")
 
         call_count = [0]
 
@@ -222,7 +260,9 @@ class TestPartialRequeue:
             for _ in range(100):
                 iface.process_outgoing(os.urandom(200))
 
-            time.sleep(0.5)
+            # Event-driven flush triggers immediately on first packet,
+            # give it time to process
+            time.sleep(1.0)
 
             # After partial failure, queue should not have all packets back
             # (some were sent successfully)

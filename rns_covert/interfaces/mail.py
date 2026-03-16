@@ -4,11 +4,9 @@ MailInterface -- Reticulum transport over standard IMAP/SMTP email.
 Works with any email provider: Yandex, Gmail, Mail.ru, Outlook, or
 any server that supports IMAP and SMTP over SSL/TLS.
 
-Reticulum packets are encrypted before they reach this layer. The
-attachment is an opaque binary blob indistinguishable from any
-compressed or encrypted file. Emails are crafted with locale-
-appropriate subjects, filenames, and body text to blend in with
-normal correspondence.
+Send (SMTP) and receive (IMAP) are fully independent. A stale SMTP
+connection does not affect polling, and a slow poll does not block
+sending.
 
 Configuration in ~/.reticulum/config:
 
@@ -67,13 +65,12 @@ class MailInterface(CovertInterface):
     locale = neutral   -- Language-neutral, ASCII-only
     """
 
-    # No hardcoded provider defaults -- all must be specified in config,
-    # except for these sensible fallbacks.
     DEFAULT_IMAP_PORT = 993
     DEFAULT_SMTP_PORT = 465
     DEFAULT_MAILBOX = "INBOX"
     PROCESSED_FOLDER = "Processed"
     DEFAULT_CONN_TIMEOUT = 30
+    MAX_MESSAGES_PER_POLL = 50
 
     def __init__(self, owner, configuration):
         c = Interface.get_config_obj(configuration)
@@ -98,9 +95,8 @@ class MailInterface(CovertInterface):
         locale_name        = c.get("locale", DEFAULT_LOCALE)
         self.locale        = get_locale(locale_name)
 
-        # Connection state
+        # Connection state -- IMAP owned by poll thread, SMTP by flush thread
         self._imap = None
-        self._imap_lock = threading.Lock()
         self._smtp = None
         self._smtp_lock = threading.Lock()
 
@@ -116,20 +112,28 @@ class MailInterface(CovertInterface):
 
     def start_transport(self):
         RNS.log(f"Connecting IMAP to {self.imap_host}:{self.imap_port}...", RNS.LOG_VERBOSE)
-        with self._imap_lock:
-            self._imap = imaplib.IMAP4_SSL(self.imap_host, self.imap_port, timeout=self._conn_timeout)
-            self._imap.login(self.account, self.password)
-            self._imap.select(self.mailbox)
+        imap = imaplib.IMAP4_SSL(self.imap_host, self.imap_port, timeout=self._conn_timeout)
+        try:
+            imap.login(self.account, self.password)
+            imap.select(self.mailbox)
+        except Exception:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            raise
+        self._imap = imap
 
-            if self.cleanup:
-                try:
-                    self._imap.create(self.PROCESSED_FOLDER)
-                except Exception as e:
-                    RNS.log(f"Could not create '{self.PROCESSED_FOLDER}' (may exist): {e}", RNS.LOG_DEBUG)
+        if self.cleanup:
+            try:
+                self._imap.create(self.PROCESSED_FOLDER)
+            except Exception as e:
+                RNS.log(f"Could not create '{self.PROCESSED_FOLDER}' (may exist): {e}", RNS.LOG_DEBUG)
 
-        RNS.log(f"Verifying SMTP to {self.smtp_host}:{self.smtp_port}...", RNS.LOG_VERBOSE)
-        smtp = self._create_smtp()
-        smtp.quit()
+        # Pre-warm SMTP connection (kept alive for first send)
+        RNS.log(f"Connecting SMTP to {self.smtp_host}:{self.smtp_port}...", RNS.LOG_VERBOSE)
+        with self._smtp_lock:
+            self._smtp = self._create_smtp()
 
         RNS.log(f"Mail transport ready: {self.account} <-> {self.peer_address}", RNS.LOG_VERBOSE)
 
@@ -139,35 +143,53 @@ class MailInterface(CovertInterface):
     def _create_smtp(self):
         if self.smtp_port == 587:
             smtp = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=self._conn_timeout)
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.ehlo()  # RFC 3207 §4.2: re-negotiate capabilities after STARTTLS
+            try:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+                smtp.login(self.account, self.password)
+            except Exception:
+                try:
+                    smtp.close()
+                except Exception:
+                    pass
+                raise
         else:
             smtp = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=self._conn_timeout)
-        smtp.login(self.account, self.password)
+            try:
+                smtp.login(self.account, self.password)
+            except Exception:
+                try:
+                    smtp.close()
+                except Exception:
+                    pass
+                raise
         return smtp
 
     def _scan_existing_messages(self):
         try:
-            with self._imap_lock:
-                status, data = self._imap.uid('search', None, 'ALL')
-                if status == "OK" and data[0]:
-                    uids = data[0].split()
-                    for uid in uids:
-                        try:
-                            status, hdr_data = self._imap.uid(
-                                'fetch', uid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])'
-                            )
-                            if status == "OK" and hdr_data[0] and len(hdr_data[0]) > 1:
-                                raw_header = hdr_data[0][1]
-                                msg_id = email.message_from_bytes(raw_header).get("Message-ID", "").strip()
-                                dedup_key = msg_id if msg_id else uid.decode()
-                                self._processed_ids.add(dedup_key)
-                        except Exception as e:
-                            RNS.log(f"Error scanning existing message {uid}: {e}", RNS.LOG_DEBUG)
-                    RNS.log(f"Marked {len(uids)} existing messages as processed", RNS.LOG_VERBOSE)
+            status, data = self._imap.uid('search', None, 'ALL')
+            if status == "OK" and data[0]:
+                uids = data[0].split()
+                for uid in uids:
+                    try:
+                        status, hdr_data = self._imap.uid(
+                            'fetch', uid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])'
+                        )
+                        if status == "OK" and hdr_data[0] and len(hdr_data[0]) > 1:
+                            raw_header = hdr_data[0][1]
+                            msg_id = email.message_from_bytes(raw_header).get("Message-ID", "").strip()
+                            dedup_key = msg_id if msg_id else uid.decode()
+                            self._processed_ids.add(dedup_key)
+                    except Exception as e:
+                        RNS.log(f"Error scanning existing message {uid}: {e}", RNS.LOG_DEBUG)
+                RNS.log(f"Marked {len(uids)} existing messages as processed", RNS.LOG_VERBOSE)
         except Exception as e:
             RNS.log(f"Error scanning existing messages: {e}", RNS.LOG_DEBUG)
+
+    # ------------------------------------------------------------------
+    #  Send (flush thread owns SMTP)
+    # ------------------------------------------------------------------
 
     def send_packet(self, encoded_data: bytes):
         msg = self._build_email(encoded_data)
@@ -181,7 +203,6 @@ class MailInterface(CovertInterface):
             try:
                 self._smtp.sendmail(self.account, [self.peer_address], msg.as_bytes())
             except smtplib.SMTPResponseException:
-                # Server rejected the message (quota, policy, etc.) — don't retry
                 raise
             except Exception:
                 # Connection error — reconnect and retry once
@@ -189,68 +210,78 @@ class MailInterface(CovertInterface):
                 self._ensure_smtp()
                 self._smtp.sendmail(self.account, [self.peer_address], msg.as_bytes())
 
+    # ------------------------------------------------------------------
+    #  Poll (poll thread owns IMAP)
+    # ------------------------------------------------------------------
+
     def poll_packets(self) -> list:
         packets = []
+        uids_to_cleanup = []
+
         try:
-            with self._imap_lock:
-                self._ensure_imap()
-                self._imap.select(self.mailbox)
+            self._ensure_imap()
+            self._imap.select(self.mailbox)
 
-                _escaped_peer = self.peer_address.replace('\\', '\\\\').replace('"', '\\"')
-                status, data = self._imap.uid('search', None, f'(FROM "{_escaped_peer}")')
-                if status != "OK" or not data[0]:
-                    return []
+            _escaped_peer = self.peer_address.replace('\\', '\\\\').replace('"', '\\"')
+            status, data = self._imap.uid('search', None, f'(FROM "{_escaped_peer}")')
+            if status != "OK" or not data[0]:
+                return []
 
-                for uid in data[0].split():
-                    try:
-                        status, hdr_data = self._imap.uid(
-                            'fetch', uid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])'
-                        )
-                        if status != "OK":
-                            continue
+            uids = data[0].split()
 
-                        raw_header = hdr_data[0][1] if hdr_data[0] and len(hdr_data[0]) > 1 else b""
-                        msg_id = email.message_from_bytes(raw_header).get("Message-ID", "").strip()
-                        dedup_key = msg_id if msg_id else uid.decode()
+            for uid in uids[:self.MAX_MESSAGES_PER_POLL]:
+                try:
+                    status, hdr_data = self._imap.uid(
+                        'fetch', uid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])'
+                    )
+                    if status != "OK":
+                        continue
 
-                        if dedup_key in self._sent_ids:
-                            continue
+                    raw_header = hdr_data[0][1] if hdr_data[0] and len(hdr_data[0]) > 1 else b""
+                    msg_id = email.message_from_bytes(raw_header).get("Message-ID", "").strip()
+                    dedup_key = msg_id if msg_id else uid.decode()
 
-                        if dedup_key in self._processed_ids:
-                            continue
+                    if dedup_key in self._sent_ids:
+                        continue
 
-                        payload = self._extract_packet(uid)
-                        if payload is not None:
-                            packets.append(payload)
+                    if dedup_key in self._processed_ids:
+                        continue
 
-                        self._processed_ids.add(dedup_key)
+                    payload = self._extract_packet(uid)
+                    if payload is not None:
+                        packets.append(payload)
 
-                        if self.cleanup:
-                            self._cleanup_message(uid)
+                    self._processed_ids.add(dedup_key)
 
-                    except Exception as e:
-                        RNS.log(f"Error processing message {uid}: {e}", RNS.LOG_DEBUG)
+                    if self.cleanup:
+                        uids_to_cleanup.append(uid)
+
+                except Exception as e:
+                    RNS.log(f"Error processing message {uid}: {e}", RNS.LOG_DEBUG)
+
+            # Batch cleanup after processing all messages
+            if uids_to_cleanup:
+                self._batch_cleanup(uids_to_cleanup)
 
         except imaplib.IMAP4.abort:
             RNS.log(f"IMAP connection reset on {self}, will reconnect", RNS.LOG_DEBUG)
-            with self._imap_lock:
-                self._imap = None
+            self._imap = None
 
         return packets
 
     def stop_transport(self):
         try:
-            with self._imap_lock:
-                if self._imap:
-                    self._imap.close()
-                    self._imap.logout()
+            if self._imap:
+                self._imap.close()
+                self._imap.logout()
         except Exception as e:
             RNS.log(f"Error closing IMAP on {self}: {e}", RNS.LOG_DEBUG)
         self._imap = None
 
         try:
-            if self._smtp:
-                self._smtp.quit()
+            with self._smtp_lock:
+                if self._smtp:
+                    self._smtp.quit()
         except Exception as e:
             RNS.log(f"Error closing SMTP on {self}: {e}", RNS.LOG_DEBUG)
         self._smtp = None
@@ -346,19 +377,26 @@ class MailInterface(CovertInterface):
         return None
 
     # ------------------------------------------------------------------
-    #  IMAP helpers
+    #  IMAP helpers (poll thread only)
     # ------------------------------------------------------------------
 
     def _ensure_imap(self, max_retries=3):
         for _attempt in range(max_retries):
+            if self._shutdown_event.is_set():
+                raise ConnectionError("Transport is shutting down")
             if self._imap is None:
+                conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port, timeout=self._conn_timeout)
                 try:
-                    self._imap = imaplib.IMAP4_SSL(self.imap_host, self.imap_port, timeout=self._conn_timeout)
-                    self._imap.login(self.account, self.password)
-                    self._imap.select(self.mailbox)
+                    conn.login(self.account, self.password)
+                    conn.select(self.mailbox)
+                    self._imap = conn
                     return
                 except Exception as e:
                     RNS.log(f"IMAP reconnect attempt {_attempt + 1} failed: {e}", RNS.LOG_DEBUG)
+                    try:
+                        conn.logout()
+                    except Exception:
+                        pass
                     self._imap = None
             else:
                 try:
@@ -366,10 +404,16 @@ class MailInterface(CovertInterface):
                     return
                 except Exception as e:
                     RNS.log(f"IMAP noop failed, will reconnect: {e}", RNS.LOG_DEBUG)
+                    try:
+                        self._imap.logout()
+                    except Exception:
+                        pass
                     self._imap = None
         raise ConnectionError(f"IMAP connection failed after {max_retries} attempts")
 
     def _ensure_smtp(self):
+        if self._shutdown_event.is_set():
+            raise ConnectionError("Transport is shutting down")
         if self._smtp is not None:
             try:
                 self._smtp.noop()
@@ -379,17 +423,26 @@ class MailInterface(CovertInterface):
                 self._smtp = None
         self._smtp = self._create_smtp()
 
-    def _cleanup_message(self, uid: bytes):
+    def _batch_cleanup(self, uids: list):
+        """Move/delete processed messages, expunge once at the end."""
+        for uid in uids:
+            try:
+                self._imap.uid('copy', uid, self.PROCESSED_FOLDER)
+                self._imap.uid('store', uid, '+FLAGS', '\\Deleted')
+            except Exception as e:
+                RNS.log(f"Could not prepare message {uid} for cleanup: {e}", RNS.LOG_DEBUG)
+                try:
+                    self._imap.uid('store', uid, '+FLAGS', '\\Seen')
+                except Exception as e2:
+                    RNS.log(f"Could not mark message {uid} as Seen: {e2}", RNS.LOG_DEBUG)
         try:
-            self._imap.uid('copy', uid, self.PROCESSED_FOLDER)
-            self._imap.uid('store', uid, '+FLAGS', '\\Deleted')
             self._imap.expunge()
         except Exception as e:
-            RNS.log(f"Could not move message {uid} to {self.PROCESSED_FOLDER}, marking Seen: {e}", RNS.LOG_DEBUG)
-            try:
-                self._imap.uid('store', uid, '+FLAGS', '\\Seen')
-            except Exception as e2:
-                RNS.log(f"Could not mark message {uid} as Seen: {e2}", RNS.LOG_DEBUG)
+            RNS.log(f"Expunge failed on {self}: {e}", RNS.LOG_DEBUG)
+
+    def _cleanup_message(self, uid: bytes):
+        """Single-message cleanup. Prefer _batch_cleanup for multiple."""
+        self._batch_cleanup([uid])
 
     # ------------------------------------------------------------------
     #  Encode/decode -- padding, no base85 (MIME handles encoding)
