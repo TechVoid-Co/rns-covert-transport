@@ -181,8 +181,10 @@ class MailInterface(CovertInterface):
             try:
                 self._smtp.sendmail(self.account, [self.peer_address], msg.as_bytes())
             except Exception:
+                # Connection went stale — reconnect and retry once
                 self._smtp = None
-                raise
+                self._ensure_smtp()
+                self._smtp.sendmail(self.account, [self.peer_address], msg.as_bytes())
 
     def poll_packets(self) -> list:
         packets = []
