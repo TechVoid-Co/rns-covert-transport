@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """E2E test: server node. Run via test_e2e.py, not directly."""
-import sys, os, time, threading, glob, json
+import sys
+import os
+import time
+import threading
+import glob
+import json
 
 sys.path.insert(0, os.environ["PROJECT_DIR"])
 WORKSPACE = os.environ["WORKSPACE"]
 
-import RNS
-from RNS.Interfaces.Interface import Interface
-from rns_covert.base import CovertInterface, HDLC
+import RNS  # noqa: E402
+from rns_covert.base import CovertInterface  # noqa: E402
 
 class FileMailInterface(CovertInterface):
     """Sends packets as files; polls a directory for incoming."""
@@ -42,7 +46,7 @@ class FileMailInterface(CovertInterface):
         pass
 
     def __str__(self):
-        return f"FileMailInterface[server]"
+        return "FileMailInterface[server]"
 
 
 # ── Setup ──
