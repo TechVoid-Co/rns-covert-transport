@@ -10,4 +10,4 @@ Drop an interface file into ~/.reticulum/interfaces/ and
 add a config entry. Reticulum handles the rest.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
