@@ -7,7 +7,7 @@ name = "rns-covert-transport"
 version = "0.1.0"
 description = "Reticulum Network Stack interfaces for censorship-resistant communication over everyday services"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.8"
 keywords = [
     "reticulum",
