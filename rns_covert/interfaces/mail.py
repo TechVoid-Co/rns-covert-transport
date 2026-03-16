@@ -1,35 +1,16 @@
 """
 MailInterface -- Reticulum transport over standard IMAP/SMTP email.
 
-Works with any email provider: Yandex, Gmail, Mail.ru, Outlook, or
-any server that supports IMAP and SMTP over SSL/TLS.
+Works with any email provider that supports IMAP and SMTP over SSL.
 
-Reticulum packets are encrypted before they reach this layer. The
-attachment is an opaque binary blob indistinguishable from any
-compressed or encrypted file. Emails are crafted with locale-
-appropriate subjects, filenames, and body text to blend in with
-normal correspondence.
-
-Configuration in ~/.reticulum/config:
-
-    [[Mail Transport]]
-      type = MailInterface
-      enabled = yes
-      account = user@example.com
-      password = app_password
-      peer_address = peer@example.com
-      imap_host = imap.example.com
-      imap_port = 993
-      smtp_host = smtp.example.com
-      smtp_port = 465
-      locale = en
-      encoding = blob
-      poll_interval = 30
-      inner_size = 1280
-      max_sends_per_hour = 30
-      batch_window = 5
-
-Place MailInterface.py (the drop-in file) in ~/.reticulum/interfaces/
+Key design decisions for reliability:
+  - All IMAP operations use UID commands (stable across expunge)
+  - Startup records existing UIDs without marking them processed,
+    so in-flight messages from before startup are not lost
+  - Cleanup (delete/move) happens AFTER all messages in a poll
+    cycle are processed, never mid-loop (avoids UID shifts)
+  - Sent Message-IDs are tracked to skip own messages in
+    single-account operation
 """
 
 import imaplib
@@ -52,19 +33,8 @@ from rns_covert.locale import get_locale, DEFAULT_LOCALE
 class MailInterface(CovertInterface):
     """
     Reticulum custom interface -- transport over standard IMAP/SMTP.
-
-    Supports any email provider. No provider-specific logic.
-
-    encoding = blob    -- binary attachment (default, recommended)
-    encoding = base64  -- base64 text in email body (fallback)
-
-    locale = ru        -- Russian email camouflage (default)
-    locale = en        -- English email camouflage
-    locale = neutral   -- Language-neutral, ASCII-only
     """
 
-    # No hardcoded provider defaults -- all must be specified in config,
-    # except for these sensible fallbacks.
     DEFAULT_IMAP_PORT = 993
     DEFAULT_SMTP_PORT = 465
     DEFAULT_MAILBOX = "INBOX"
@@ -80,7 +50,7 @@ class MailInterface(CovertInterface):
         self.imap_host    = c["imap_host"]
         self.smtp_host    = c["smtp_host"]
 
-        # Optional with defaults
+        # Optional
         self.imap_port    = int(c.get("imap_port", self.DEFAULT_IMAP_PORT))
         self.smtp_port    = int(c.get("smtp_port", self.DEFAULT_SMTP_PORT))
         self.mailbox      = c.get("mailbox", self.DEFAULT_MAILBOX)
@@ -96,9 +66,14 @@ class MailInterface(CovertInterface):
         self._imap = None
         self._smtp_lock = threading.Lock()
 
-        # Message-ID tracking (for single-account / self-to-self operation)
-        self._sent_ids = set()
-        self._processed_ids = set()
+        # UID-based tracking.
+        # _seen_uids: set of IMAP UIDs we have already seen (at startup
+        # or after processing). New messages have UIDs not in this set.
+        self._seen_uids = set()
+
+        # _sent_message_ids: set of Message-ID header values for emails
+        # we sent. Used to skip our own messages in single-account mode.
+        self._sent_message_ids = set()
 
         super().__init__(owner, configuration)
 
@@ -125,37 +100,33 @@ class MailInterface(CovertInterface):
 
         RNS.log(f"Mail transport ready: {self.account} <-> {self.peer_address}", RNS.LOG_VERBOSE)
 
-        # Mark all existing messages as processed
-        self._scan_existing_messages()
+        # Record all current UIDs so we only process NEW messages.
+        # This is fast -- just a UID SEARCH, no header fetching.
+        self._snapshot_existing_uids()
 
-    def _scan_existing_messages(self):
+    def _snapshot_existing_uids(self):
+        """Record UIDs of all messages currently in the inbox."""
         try:
-            status, data = self._imap.search(None, "ALL")
+            status, data = self._imap.uid("SEARCH", None, "ALL")
             if status == "OK" and data[0]:
-                uids = data[0].split()
-                for uid in uids:
-                    try:
-                        status, hdr_data = self._imap.fetch(
-                            uid, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
-                        )
-                        if status == "OK" and hdr_data[0] and len(hdr_data[0]) > 1:
-                            raw = hdr_data[0][1].decode("utf-8", errors="ignore")
-                            for line in raw.splitlines():
-                                if line.lower().startswith("message-id:"):
-                                    self._processed_ids.add(line.split(":", 1)[1].strip())
-                                    break
-                    except Exception:
-                        pass
-                RNS.log(f"Marked {len(uids)} existing messages as processed", RNS.LOG_VERBOSE)
-        except Exception:
-            pass
+                for uid in data[0].split():
+                    self._seen_uids.add(uid)
+            count = len(self._seen_uids)
+            RNS.log(f"Recorded {count} existing message UIDs", RNS.LOG_VERBOSE)
+        except Exception as e:
+            RNS.log(f"Could not snapshot existing UIDs: {e}", RNS.LOG_WARNING)
+
+    # ------------------------------------------------------------------
+    #  Send
+    # ------------------------------------------------------------------
 
     def send_packet(self, encoded_data: bytes):
         msg = self._build_email(encoded_data)
 
+        # Track Message-ID so we skip our own mail when polling
         msg_id = msg["Message-ID"]
         if msg_id:
-            self._sent_ids.add(msg_id)
+            self._sent_message_ids.add(msg_id)
 
         with self._smtp_lock:
             smtp = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port)
@@ -168,63 +139,89 @@ class MailInterface(CovertInterface):
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------
+    #  Poll
+    # ------------------------------------------------------------------
+
     def poll_packets(self) -> list:
+        """
+        Check inbox for new messages. Uses IMAP UIDs for stability.
+
+        Steps:
+          1. UID SEARCH ALL -- get current UIDs
+          2. new_uids = current - _seen_uids
+          3. For each new UID: fetch, check not sent by self, extract
+          4. Mark all new UIDs as seen
+          5. Batch cleanup AFTER processing (no mid-loop expunge)
+        """
         packets = []
+        uids_to_cleanup = []
+
         try:
             self._ensure_imap()
             self._imap.select(self.mailbox)
 
-            status, data = self._imap.search(None, "ALL")
+            # Step 1: get all current UIDs
+            status, data = self._imap.uid("SEARCH", None, "ALL")
             if status != "OK" or not data[0]:
                 return []
 
-            for uid in data[0].split():
+            current_uids = set(data[0].split())
+
+            # Step 2: find new UIDs
+            new_uids = current_uids - self._seen_uids
+            if not new_uids:
+                return []
+
+            RNS.log(f"{self}: {len(new_uids)} new message(s) to process", RNS.LOG_DEBUG)
+
+            # Step 3: process each new message
+            for uid in sorted(new_uids):
                 try:
-                    status, hdr_data = self._imap.fetch(
-                        uid, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
-                    )
-                    if status != "OK":
+                    # Fetch full message
+                    status, msg_data = self._imap.uid("FETCH", uid, "(RFC822)")
+                    if status != "OK" or not msg_data[0]:
+                        self._seen_uids.add(uid)
                         continue
 
-                    raw_header = hdr_data[0][1] if hdr_data[0] and len(hdr_data[0]) > 1 else b""
-                    msg_id = ""
-                    for line in raw_header.decode("utf-8", errors="ignore").splitlines():
-                        if line.lower().startswith("message-id:"):
-                            msg_id = line.split(":", 1)[1].strip()
-                            break
+                    raw_email = msg_data[0][1]
+                    parsed = email.message_from_bytes(raw_email)
 
-                    if msg_id in self._sent_ids:
+                    # Check if we sent this ourselves (single-account mode)
+                    msg_id = parsed.get("Message-ID", "")
+                    if msg_id in self._sent_message_ids:
+                        self._seen_uids.add(uid)
+                        if self.cleanup:
+                            uids_to_cleanup.append(uid)
                         continue
 
-                    if msg_id in self._processed_ids:
-                        continue
-
-                    payload = self._extract_packet(uid)
+                    # Extract packet
+                    payload = self._extract_from_parsed(parsed)
                     if payload is not None:
                         packets.append(payload)
 
-                    self._processed_ids.add(msg_id)
+                    # Mark as seen regardless of extraction success
+                    self._seen_uids.add(uid)
 
                     if self.cleanup:
-                        self._cleanup_message(uid)
+                        uids_to_cleanup.append(uid)
 
                 except Exception as e:
-                    RNS.log(f"Error processing message {uid}: {e}", RNS.LOG_DEBUG)
+                    RNS.log(f"Error processing UID {uid}: {e}", RNS.LOG_DEBUG)
+                    # Still mark as seen so we don't retry forever
+                    self._seen_uids.add(uid)
+
+            # Step 5: batch cleanup AFTER all processing
+            if uids_to_cleanup:
+                self._batch_cleanup(uids_to_cleanup)
 
         except imaplib.IMAP4.abort:
             RNS.log(f"IMAP connection reset on {self}, will reconnect", RNS.LOG_DEBUG)
             self._imap = None
+        except Exception as e:
+            RNS.log(f"Poll error on {self}: {e}", RNS.LOG_DEBUG)
 
         return packets
-
-    def stop_transport(self):
-        try:
-            if self._imap:
-                self._imap.close()
-                self._imap.logout()
-        except Exception:
-            pass
-        self._imap = None
 
     # ------------------------------------------------------------------
     #  Email construction
@@ -279,14 +276,8 @@ class MailInterface(CovertInterface):
     #  Packet extraction
     # ------------------------------------------------------------------
 
-    def _extract_packet(self, msg_id: bytes) -> bytes:
-        status, data = self._imap.fetch(msg_id, "(RFC822)")
-        if status != "OK":
-            return None
-
-        raw_email = data[0][1]
-        msg = email.message_from_bytes(raw_email)
-
+    def _extract_from_parsed(self, msg) -> bytes:
+        """Extract packet payload from a parsed email message."""
         if self.encoding_name == "base64":
             return self._extract_base64(msg)
         else:
@@ -330,16 +321,34 @@ class MailInterface(CovertInterface):
                 self._imap = None
                 self._ensure_imap()
 
-    def _cleanup_message(self, msg_id: bytes):
+    def _batch_cleanup(self, uids: list):
+        """
+        Move/delete processed messages AFTER all polling is done.
+        Uses UID commands so IDs remain stable throughout.
+        """
         try:
-            self._imap.copy(msg_id, self.PROCESSED_FOLDER)
-            self._imap.store(msg_id, "+FLAGS", "\\Deleted")
+            for uid in uids:
+                try:
+                    if self.cleanup:
+                        self._imap.uid("COPY", uid, self.PROCESSED_FOLDER)
+                    self._imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+                except Exception:
+                    pass
+
+            # Single expunge at the end
             self._imap.expunge()
+
+        except Exception as e:
+            RNS.log(f"Cleanup error on {self}: {e}", RNS.LOG_DEBUG)
+
+    def stop_transport(self):
+        try:
+            if self._imap:
+                self._imap.close()
+                self._imap.logout()
         except Exception:
-            try:
-                self._imap.store(msg_id, "+FLAGS", "\\Seen")
-            except Exception:
-                pass
+            pass
+        self._imap = None
 
     # ------------------------------------------------------------------
     #  Encode/decode -- padding, no base85 (MIME handles encoding)
