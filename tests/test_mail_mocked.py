@@ -108,6 +108,8 @@ class TestPollPackets:
         iface.locale = get_locale("en")
         iface._imap = mock_imap
         iface._smtp = None
+        iface._imap_lock = threading.Lock()
+        iface._imap_lock = threading.Lock()
         iface._smtp_lock = threading.Lock()
         iface._sent_ids = BoundedIdSet()
         iface._processed_ids = BoundedIdSet()
@@ -180,6 +182,7 @@ class TestPollPackets:
         iface.locale = get_locale("en")
         iface._imap = mock_imap
         iface._smtp = None
+        iface._imap_lock = threading.Lock()
         iface._smtp_lock = threading.Lock()
         iface._sent_ids = BoundedIdSet()
         iface._processed_ids = BoundedIdSet()
@@ -234,6 +237,7 @@ class TestPollPackets:
         iface.locale = get_locale("en")
         iface._imap = mock_imap
         iface._smtp = None
+        iface._imap_lock = threading.Lock()
         iface._smtp_lock = threading.Lock()
         iface._sent_ids = BoundedIdSet()
         iface._processed_ids = BoundedIdSet()
@@ -340,6 +344,7 @@ class TestSendPacket:
         iface.encoder = get_encoder("blob")
         iface.locale = get_locale("en")
         iface._smtp = mock_smtp
+        iface._imap_lock = threading.Lock()
         iface._smtp_lock = threading.Lock()
         iface._sent_ids = BoundedIdSet()
         iface.inner_size = 1280

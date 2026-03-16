@@ -214,7 +214,6 @@ class CovertInterface(Interface):
         # Polling
         self.poll_interval = float(c.get("poll_interval", self.DEFAULT_POLL_INTERVAL))
         self.retry_delay   = float(c.get("retry_delay", self.DEFAULT_RETRY_DELAY))
-        self.encoding = c.get("encoding", "attachment")
         self._config = c
 
         # Threads and state
@@ -381,11 +380,11 @@ class CovertInterface(Interface):
                     sent_count += 1
                     self._last_send_time = time.time()
 
-                    RNS.log(
-                        f"{self}: sent batch ({len(packets)} pkt(s) in "
-                        f"{len(payloads)} email(s))",
-                        RNS.LOG_DEBUG,
-                    )
+                RNS.log(
+                    f"{self}: sent batch ({len(packets)} pkt(s) in "
+                    f"{len(payloads)} payload(s))",
+                    RNS.LOG_DEBUG,
+                )
 
             except Exception as e:
                 RNS.log(f"Flush error on {self}: {e}", RNS.LOG_WARNING)
