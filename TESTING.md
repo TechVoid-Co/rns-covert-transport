@@ -10,7 +10,7 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-49 tests covering:
+91 tests covering:
 
 - HDLC frame/deframe with all edge cases (flag bytes, escape bytes, multiple frames)
 - Padding roundtrip, fixed-size verification, corruption detection
@@ -37,7 +37,7 @@ Runs in approximately 5 seconds.
 Tests actual packet delivery through Yandex Mail. Requires a Yandex Mail account.
 
 1. Copy `test_live_email.py` (not included in the repository for credential safety)
-   or write your own using the pattern in `tests/test_yandex_mail.py`.
+   or write your own using the MailInterface configuration pattern in the README.
 
 2. Configure your account credentials.
 
