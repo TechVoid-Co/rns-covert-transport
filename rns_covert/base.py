@@ -215,6 +215,7 @@ class CovertInterface(Interface):
         # Polling
         self.poll_interval = float(c.get("poll_interval", self.DEFAULT_POLL_INTERVAL))
         self.retry_delay   = float(c.get("retry_delay", self.DEFAULT_RETRY_DELAY))
+        self.drop_on_fail  = c.get("drop_on_fail", "no").lower() in ("yes", "true", "1")
         self._config = c
 
         # Threads and state
@@ -391,18 +392,28 @@ class CovertInterface(Interface):
                 )
 
             except Exception as e:
-                # Check if server permanently rejected (5xx SMTP code)
                 smtp_code = getattr(e, 'smtp_code', 0)
-                if smtp_code >= 500:
+                is_permanent = smtp_code >= 500
+
+                if is_permanent and self.drop_on_fail:
                     RNS.log(
-                        f"{self}: server rejected send ({smtp_code}), "
+                        f"{self}: server rejected ({smtp_code}), "
                         f"dropping {len(packets)} pkt(s): {e}",
                         RNS.LOG_ERROR,
                     )
+                elif is_permanent:
+                    RNS.log(
+                        f"{self}: server rejected ({smtp_code}), "
+                        f"keeping {len(packets)} pkt(s) in queue to retry: {e}",
+                        RNS.LOG_WARNING,
+                    )
+                    self._handle_error()
+                    with self._queue_lock:
+                        for pkt in reversed(packets):
+                            self._outgoing_queue.appendleft(pkt)
                 else:
                     RNS.log(f"Flush error on {self}: {e}", RNS.LOG_WARNING)
                     self._handle_error()
-
                     if sent_count == 0:
                         with self._queue_lock:
                             for pkt in reversed(packets):
