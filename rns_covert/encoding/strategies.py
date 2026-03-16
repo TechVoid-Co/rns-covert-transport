@@ -10,8 +10,6 @@ Two modes only:
 """
 
 import base64
-import struct
-import os
 
 
 class BlobEncoder:

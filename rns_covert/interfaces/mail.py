@@ -21,7 +21,6 @@ import email.mime.multipart
 import email.mime.text
 import email.utils
 import email.encoders
-import os
 import threading
 import RNS
 from RNS.Interfaces.Interface import Interface
